@@ -1,0 +1,204 @@
+---
+title: "Cryptoasset Analysis using Signed Betas"
+author: "Karim Helmy: karim@timelock.cc"
+date: "11/13/2019"
+output: html_document
+---
+
+## Summary
+
+Formal analysis of the cryptoasset space is still in its infancy, and to our knowledge there has not yet been a differentiation between downside and upside performance of assets. In this report, we perform an analysis on the upside and downside $\beta$ and $\alpha$ of Bitcoin Cash (BCH), Ether (ETH), Monero (XMR), and ZCash (ZEC) with respect to Bitcoin. We find that these assets are all much more exposed to Bitcoin's changes in price during downturns than they are during upswings, and additionally have negative independent returns during downturns, both of which are factors leading to general decreased performance.
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+options(scipen=999)
+library(tidyquant)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(formattable)
+```
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+final_date = date("2019-11-12")
+yoy_start_date = final_date - 365
+btc_data = read_csv('./btc.csv')
+btc_data$Symbol = 'BTC'
+btc_data$PriceUSD_btc = btc_data$PriceUSD
+eth_data = read_csv('./eth.csv')
+eth_data$Symbol = 'ETH'
+eth_data = left_join(eth_data, btc_data[,c('date', 'PriceUSD', 'PriceBTC')], by = 'date', suffix = c('', '_btc'))
+bch_data = read_csv('./bch.csv')
+bch_data$Symbol = 'BCH'
+bch_data = left_join(bch_data, btc_data[,c('date', 'PriceUSD', 'PriceBTC')], by = 'date', suffix = c('', '_btc'))
+zec_data = read_csv('./zec.csv')
+zec_data = zec_data[20:dim(zec_data)[1],] # clean out junk values at start
+zec_data$Symbol = 'ZEC'
+zec_data = left_join(zec_data, btc_data[,c('date', 'PriceUSD', 'PriceBTC')], by = 'date', suffix = c('', '_btc'))
+xmr_data = read_csv('./xmr.csv')
+xmr_data$Symbol = 'XMR'
+xmr_data = left_join(xmr_data, btc_data[,c('date', 'PriceUSD', 'PriceBTC')], by = 'date', suffix = c('', '_btc'))
+```
+
+```{r echo=FALSE}
+data_dfs = list(btc_data, eth_data, bch_data, zec_data, xmr_data)
+mkt_data_full = na.omit(bind_rows(data_dfs)[,c('Symbol', 'date','PriceUSD', 'PriceUSD_btc', 'PriceBTC')]) %>%
+  mutate(PriceUSD_delta = PriceUSD - lag(PriceUSD, k = 1) ) %>%
+  mutate(PriceUSD_btc_delta = PriceUSD_btc - lag(PriceUSD_btc, k = 1) ) %>%
+  mutate(PriceUSD_pct_delta = 100 * (PriceUSD - lag(PriceUSD, k = 1)) / lag(PriceUSD, k = 1) ) %>%
+  mutate(PriceUSD_btc_pct_delta = 100 * (PriceUSD_btc - lag(PriceUSD_btc, k = 1)) / lag(PriceUSD_btc, k = 1) )
+mkt_data_full = mkt_data_full %>%
+  mutate(Pct_start_value = apply(mkt_data_full, 1,
+                                 function(x) 100 * as.numeric(x["PriceUSD"]) / (mkt_data_full$PriceUSD[mkt_data_full$Symbol == x["Symbol"]][1]) ) ) %>%
+  mutate(Pct_start_value_btc = apply(mkt_data_full, 1,
+                                 function(x) 100 * as.numeric(x["PriceUSD_btc"]) / (mkt_data_full$PriceUSD_btc[mkt_data_full$Symbol == x["Symbol"]][1]) ) ) %>%
+  mutate(Pct_start_value_delta = Pct_start_value - lag(Pct_start_value, k = 1)) %>%
+  mutate(Pct_start_value_btc_delta = Pct_start_value_btc - lag(Pct_start_value_btc, k = 1))
+coin_factors = c('BTC', 'BCH', 'ETH', 'XMR', 'ZEC' )
+mkt_data_full$Symbol = factor(mkt_data_full$Symbol, levels = coin_factors)
+mkt_data_full = drop_na(mkt_data_full[mkt_data_full$PriceUSD_pct_delta != min(mkt_data_full[mkt_data_full$Symbol == 'ETH',]$PriceUSD_pct_delta),]) # Clean out junk value
+mkt_data_yoy = mkt_data_full[mkt_data_full$date > yoy_start_date,]
+mkt_data_yoy = mkt_data_yoy %>%
+  mutate(Pct_start_value = apply(mkt_data_yoy, 1,
+                                 function(x) 100 * as.numeric(x["PriceUSD"]) / (mkt_data_yoy$PriceUSD[mkt_data_yoy$Symbol == x["Symbol"]][1]) ) ) %>%
+  mutate(Pct_start_value_delta = Pct_start_value - lag(Pct_start_value, k = 1))
+
+mkt_data_yoy$Pct_start_value_btc = mkt_data_yoy[mkt_data_yoy$Symbol == "BTC",]$Pct_start_value
+mkt_data_yoy$Pct_start_value_btc_delta = mkt_data_yoy[mkt_data_yoy$Symbol == "BTC",]$Pct_start_value_delta
+```
+
+## Motivation
+
+Bitcoin has outperformed most other large-cap cryptocurrencies in the last year. To observe this, consider the the graph below, showing the price of cryptocurrencies in the period from 12 November 2018 to 12 November 2019 as a percentage of their starting value in that period. 
+
+```{r warning=FALSE, echo=FALSE}
+mkt_summary_plots = function(mkt_data) {
+  list(
+    ggplot(mkt_data, aes(x = date, y = Pct_start_value, color = Symbol)) +
+      geom_line() +
+      labs(title = "Value of Coins over Time (Percent Start Price, USD)", x = "Date", y = "Percent Start Price, USD") +
+      theme(plot.title = element_text(hjust = 0.5)),
+    ggplot(mkt_data, aes(x = date, y = Pct_start_value_delta, color = Symbol)) +
+      geom_line() +
+      facet_grid(Symbol ~ .) +
+      labs(title = "Daily Change in Value (Percent Start Price, USD)", x = "Date", y = "Change in Value (Percent Start Price, USD)") +
+      theme(legend.position = "none", plot.title = element_text(hjust = 0.5))
+  )
+}
+
+yoy_summary_plots = mkt_summary_plots(mkt_data_yoy)
+yoy_summary_plots[[1]]
+```
+
+```{r include=FALSE}
+# Get returns
+returns = mkt_data_yoy %>% with(tapply(X = Pct_start_value, INDEX = Symbol, last)) - 100
+returns
+```
+
+Simply put, this graph can be interpreted as answering the following question: "if I allocated 100 USD into each of the following assets at the start date, how many dollars would that be worth today?" Because the value-per-unit of each asset is on such a different scale, this type of comparison is the only meaningful way to compare price. The differences in performance are quite stark: Bitcoin (BTC) is the only asset of those considered that would have yielded a positive return, with a return of 39.86%. The returns on Ether (ETH), Monero (XMR), Bitcoin Cash (BCH), and ZCash (ZEC) were -7.65%, -37.16%, -43.44%, and -70.75%. 
+
+Somewhat paradoxically, however, the performance of the cryptoasset space is highly correlated with that of Bitcoin, its largest constituent currency. This can be visually confirmed in the graph below, tracking the daily change in price of the studied assets as a percentage of their start price.
+
+```{r warning=FALSE, echo=FALSE}
+yoy_summary_plots[[2]]
+```
+
+```{r echo = FALSE}
+r_f = 0
+get_beta = function(asset_change, benchmark_change) {
+  asset_cov = cov(asset_change, benchmark_change, use = "complete.obs")
+  asset_cor = cor(asset_change, benchmark_change, use = "complete.obs")
+  benchmark_var = var(benchmark_change, use = "complete.obs")
+  asset_var = var(asset_change, use = "complete.obs")
+  beta = asset_cov / benchmark_var
+  asset_return = sum(asset_change, na.rm = TRUE) / 100
+  benchmark_return = sum(benchmark_change, na.rm = TRUE) / 100
+  alpha = (asset_return - r_f) - beta * (benchmark_return - r_f)
+  return(c(asset_cov, benchmark_var, asset_var, beta, asset_cor,
+           asset_return, benchmark_return, alpha))
+}
+
+get_financial_info = function(asset_change, benchmark_change) {
+  up_days = benchmark_change > 0
+  beta = get_beta(asset_change, benchmark_change)
+  upside_beta = get_beta(asset_change[up_days], benchmark_change[up_days])
+  downside_beta = get_beta(asset_change[! up_days], benchmark_change[! up_days])
+  return(tibble(AssetCov = beta[1],
+                BenchmarkVar = beta[2],
+                AssetVar = beta[3],
+                Beta = beta[4],
+                AssetCor = beta[5],
+                AssetReturn = beta[6],
+                BenchmarkReturn = beta[7],
+                Alpha = beta[8],
+                DownsideAssetCov = downside_beta[1],
+                DownsideBenchmarkVar = downside_beta[2],
+                DownsideAssetVar = downside_beta[3],
+                DownsideBeta = downside_beta[4],
+                DownsideCor = downside_beta[5],
+                DownsideAssetReturn = downside_beta[6],
+                DownsideBenchmarkReturn = downside_beta[7],
+                DownsideAlpha = downside_beta[8],
+                UpsideAssetCov = upside_beta[1],
+                UpsideBenchmarkVar = upside_beta[2],
+                UpsideAssetVar = upside_beta[3],
+                UpsideBeta = upside_beta[4],
+                UpsideCor = upside_beta[5],
+                UpsideAssetReturn = upside_beta[6],
+                UpsideBenchmarkReturn = upside_beta[7],
+                UpsideAlpha = upside_beta[8]
+                ))
+}
+```
+
+```{r warning=FALSE, include=FALSE}
+analyze_betas = function(mkt_data) {
+  beta_calcs = mkt_data %>%
+    # unite(Prices, c(PriceUSD_pct_delta, PriceUSD_btc_pct_delta, PriceUSD, PriceUSD_btc)) %>%
+    unite(Prices, c(Pct_start_value_delta, Pct_start_value_btc_delta)) %>%
+    with(tapply(X = Prices, INDEX = Symbol,
+                FUN = function(x) {
+                  x_numeric = as.numeric(unlist(strsplit(x, '_')))
+                  var_type = rep_len(c(1, 2), length(x_numeric))
+                  get_financial_info(x_numeric[var_type == 1][-1], x_numeric[var_type == 2][-1])
+                } ))
+  
+  calcs_tbl = tibble()
+  for (symbol in names(beta_calcs)) {
+    calcs_tbl = rbind(calcs_tbl, beta_calcs[[symbol]] %>% mutate(Symbol = factor(symbol, levels = coin_factors)))
+  }
+  calcs_tbl
+}
+calcs_tbl = analyze_betas(mkt_data_yoy)
+calcs_tbl
+cor_info = calcs_tbl %>%
+  transmute(Symbol = Symbol, Correlation = AssetCor, "Upside Correlation" = UpsideCor, "Downside Correlation" = DownsideCor)
+cor_info
+```
+
+Numerically, this is confirmed as well: the correlations between Bitcoin and Ether, Bitcoin Cash, Monero, and ZCash are 0.80, 0.73, 0.71, 0.66, respectively. These values correspond to moderately high correlation, in the case of ZCash, to high correlation, in the case of the of all other assets, between the assets and the benchmark.
+
+## Methodology and Results
+
+To identify where this differentiation occurs, we study the relative performance of each asset during Bitcoin's upside and downside periods. We identify each asset's coefficient of systemic risk, or $\beta$, benchmarked against the performance Bitcoin. We then decompose $\beta$ into upside $\beta$ ($\beta^+$) and downside $\beta$ ($\beta^+$), considering only the days on which Bitcoin's returns were positive and negative, respectively. For each asset, we then derive $\alpha$, $\alpha^+$, and $\alpha^-$, the excess returns on the corresponding days calculated using the corresponding systemic risk, for the sake of simplicity using a risk-free rate of 0. The results of these calculations are shown in the table below.
+
+```{r warning=FALSE, echo = FALSE}
+calcs_short = calcs_tbl %>%
+    transmute(Symbol = Symbol,
+              Beta = Beta, Alpha = Alpha, 
+              'Upside Beta' = UpsideBeta, 'Upside Alpha' = UpsideAlpha, 
+              'Downside Beta' = DownsideBeta, 'Downside Alpha' = DownsideAlpha)
+formattable(calcs_short)
+```
+
+Analyzing these results, we find that $\beta^-$ significantly exceeds $\beta^+$ for each altcoin. This indicates that each altcoin in the study is more exposed to Bitcoin's downturns than to its upswings. On decomposition, the negative $\alpha$ is shown to be a result of this increased exposure, in combination with a negative $\alpha^-$, and despite a positive $\alpha^+$.
+
+These results lead us to conclude that the poor altcoin market performance occurs as a result of both greater exposure to Bitcoin's downside than upside, and an independent negative return in downside situations. 
+
+## Implications
+
+The methodology described here is generalizable to other baskets of currencies---for example, it would be interesting to see an analysis of the performance of ERC20 tokens benchmarked against that of Ether, or a comparison of various stablecoins' risk against that of Tether's USDT. Differentiating between upside and downside risk is critical in times of systemic crisis, and we hope to that this differentiation becomes standard practice in the cryptoasset space as the industry matures.
+
+## Acknowledgements
+
+We would like to thank [Coin Metrics](https://coinmetrics.io/) for providing the data used in this study.
