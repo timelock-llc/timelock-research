@@ -1,0 +1,160 @@
+---
+title: "Calculating Market Cap/Security Spend Multiples"
+author: "Karim Helmy"
+date: "11/28/2019"
+output: html_document
+---
+
+## Summary
+
+In this report, we analyze the relationship between market capitalization and network security spend for several Proof of Work cryptocurrencies. By calculating our data using mining prices from NiceHash, a hashpower marketplace, rather than directly comparing hashpower, we can compare computational investment across different mining algorithms, allowing us to compensate for differences in computational difficulty and chip optimization. We find a strong positive relationship between market cap and security spend, and derive a metric for analyzing the consistency of the markets with respect to security spend.
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+options(scipen=999)
+library(tidyquant)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(formattable)
+library(rvest)
+library(jsonlite)
+```
+
+```{r include=FALSE}
+aux_info = tibble(Symbol = c('BTC', 'BCH', 'BSV', 'ETH', 'ETC', 'XMR', 'LTC', 'ZEC'),
+                  BicUrl = 'https://bitinfocharts.com/' %>% paste0(c('bitcoin', 'bitcoin%20cash', 'bitcoin%20sv', 'ethereum',
+                                                                     'ethereum%20classic', 'monero', 'litecoin', 'zcash' )),
+                  AlgoName = c('SHA256', 'SHA256', 'SHA256', 'Ethash', 'Ethash', 'CryptoNightR', 'Scrypt', 'Equihash'),
+                  NHAlgoName = c('SHA256', 'SHA256', 'SHA256', 'DaggerHashimoto', 'DaggerHashimoto', 'CryptoNightR', 'Scrypt', 'Equihash'),
+                  NHAlgoNumber = c(1, 1, 1, 20, 20, 42, 0, 24),
+                  NHAlgoMulti = c(0.0000001, 0.0000001, 0.0000001, 0.0001, 0.0001, 100, 0.0001, 100),
+                  NHAlgoScale = c('P', 'P', 'P', 'T', 'T', 'M', 'T', 'M'))
+```
+
+```{r include=FALSE}
+scale_hash_rate = function(x) {
+  as.numeric(x[1]) * unlist(list("M" = 10^6, "G" = 10^9, "T" = 10^12, "P" = 10^15, "E" = 10^18)[x[2]])
+}
+
+fetch_bit_info_charts = function(aux_info) {
+  
+  hash_info = c()
+  mkt_cap_info = c()
+  for(i in 1:length(aux_info$BicUrl)){
+    scraped_table = aux_info$BicUrl[i] %>%
+      read_html() %>%
+      html_nodes(xpath='//*[@id="main_body"]/table') %>%
+      html_table() %>%
+      unlist()
+    coin_hash_rate = scraped_table[grep("hash/s", scraped_table)] %>%
+      str_remove_all("hash.*") %>%
+      str_split(" ") %>%
+      unlist() %>%
+      scale_hash_rate()
+    hash_info = c(hash_info, coin_hash_rate)
+    coin_mkt_cap = scraped_table[grep("^\\$.*USD$", scraped_table)] %>%
+      str_remove_all("[^0-9]") %>%
+      as.numeric()
+    mkt_cap_info = c(mkt_cap_info, coin_mkt_cap)
+  }
+  tibble(Symbol = aux_info$Symbol, MktCap = mkt_cap_info, HashRate = hash_info)
+}
+bic_info = fetch_bit_info_charts(aux_info)
+bic_info
+```
+
+```{r include=FALSE}
+scale_price = function(price, scale) {
+  unlist(list("M" = 10^6, "G" = 10^9, "T" = 10^12, "P" = 10^15, "E" = 10^18)[scale]) / as.numeric(price)
+}
+
+fetch_nice_hash = function(aux_info) {
+  fromJSON('https://api2.nicehash.com/main/api/v2/public/stats/global/24h')$algos %>%
+    filter(a %in% aux_info$NHAlgoNumber) %>%
+    transmute(NHAlgoNumber = a, Price = p, Speed = s) %>%
+    right_join(aux_info, by = "NHAlgoNumber") %>%
+    transmute(Symbol = Symbol, HashesPerSecondPerBitcoinPerDay = scale_price(Price / NHAlgoMulti, NHAlgoScale),
+              AlgoName = AlgoName)
+}
+nh_info = fetch_nice_hash(aux_info)
+nh_info
+```
+
+## Motivation
+
+While Proof of Work is a critical component in the security model of most cryptocurrencies, the amount of work securing the network is difficult to quantify. Hashrate is only indirectly measurable, and once measured, it cannot be compared across different hashing algorithms. To address the need for a metric that can be compared across assets, we turn to total network security spend. To derive something of an analog to the Price/Earnings Multiple used in equity markets, which provides investors with a single-number comparison of an asset's valuation to its cash flows, we compare each asset's market cap to its network security spend, arriving at the Cap/Spend Multiple.
+
+## Methodology
+
+We begin by scraping data from BitInfoCharts on the current market cap and hashrate of Bitcoin (BTC), Bitcoin Cash (BCH), Bitcoin SV (BSV), Ethereum (ETH), Ethereum Classic (ETC), Monero (XMR), Litecoin (LTC), and Monero (XMR). We then collect hashpower prices from NiceHash, a hashpower marketplace that allows users to rent mining power for short periods of time. Since the prices on this marketplace are subject to similar market force as the rest of the mining industry, they must remain competitive, allowing us to use the listed prices as a proxy for the difficulty of performing these computations.
+
+Using these prices and the hashrate collected from BitInfoCharts, we can estimate the daily cost in Bitcoin of maintaining the network's current hashpower. This allows us to avoid the pitfall of comparing hashrate directly, which would fail to account for the differences in hardare optimization, computational difficulty, and memory requirements of each algorithm's computation. We then divide the market cap by the daily security spend to calculate the Cap/Spend Multiple, which serves as an indicator of the cryptoasset's valuation with respect to the security spend on its network. We then adjust these results against those of Bitcoin to allow for easier comparison against a benchmark. 
+
+## Results
+
+```{r echo=FALSE}
+ag_info = bic_info %>%
+  left_join(nh_info, by = "Symbol") %>%
+  mutate(Symbol = factor(aux_info$Symbol, levels = aux_info$Symbol), DailyBitcoinSecSpend = HashRate / HashesPerSecondPerBitcoinPerDay,
+         CapSpendRatio = MktCap / DailyBitcoinSecSpend) %>%
+  mutate(CapSpendProp =  (CapSpendRatio * 100) / CapSpendRatio[1])
+```
+
+A linear relationship between Market Cap and Network Spend is observed in the plot below, which shows the two variables plotted against one another. Visually, we can confirm that there exists a strong positive relationship between the two variables, and that the relationship appears to be linear.
+
+```{r echo=FALSE, warning=FALSE}
+ag_info %>%
+  ggplot(aes(x = DailyBitcoinSecSpend, y = MktCap / 10^9, color = Symbol)) +
+  geom_point() +
+  labs(title = "Market Cap versus Network Security Spend", y = "Market Cap (Billion USD)", x = "Daily Network Security Spend (BTC)") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Because both the market cap and security spend of Bitcoin are much higher than those of the other currencies, this plot can be more easily interpreted after applying a logarithmic transform to the Market Cap, shown below. As is expected of a linear relationship, the plot visually follows a logarithmic relationship on transformation of the response variable.
+
+```{r echo=FALSE, warning=FALSE}
+ag_info %>%
+  ggplot(aes(x = DailyBitcoinSecSpend, y = log(MktCap / 10^9), color = Symbol)) +
+  geom_point() +
+  labs(title = "Log of Market Cap versus Network Security Spend", y = "Log of Market Cap (Billion USD)", x = "Daily Network Security Spend (BTC)") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+The validity of the relationship is numerically confirmed by applying a linear regression, which indicates a strong positive relationship that is statistically significant at the 0.001 level. To account for the possibility that the inclusion of Bitcoin, with much higher security spend and market cap than the other coins, is skewing the results, we perform the same analysis while excluding that data point---this too yields a strong positive relationship that is statistically significant at the same level, indicating that the outcome was not substantially affected by Bitcoin's inclusion.
+
+```{r include=FALSE}
+ag_info %>% with(lm(MktCap ~ DailyBitcoinSecSpend)) %>% summary()
+ag_info %>% with(lm(MktCap[-1] ~ DailyBitcoinSecSpend[-1])) %>% summary()
+```
+
+Having established that there exists a meaningful positive relationship between the two variables, we turn our attention to the ratio of the two, the Cap/Spend Multiple. For the currencies observed, the Cap/Spend Multiple ranges from about $1 \cdot 10^7$, in the case of ZCash, to almost $9 \cdot 10^7$, in the case of Monero. Bitcoin's multiple is roughly $8 \cdot 10^7$. Representing each currency's Cap/Spend Multiple as a percentage of Bitcoin's, we can analyze the degree to which each currency's security spend is reflected in its market cap with respect to that benchmark. The results of each computation are shown in the table below.
+
+```{r echo=FALSE}
+ag_info %>%
+  transmute(Symbol = Symbol, "Algorithm" = AlgoName, "Market Cap (USD)" = MktCap, "Hashes per Second" = HashRate,
+            "Hashes/Second per Bitcoin Spent/Day" = HashesPerSecondPerBitcoinPerDay,
+            "Daily Network Security Spend (BTC)" = DailyBitcoinSecSpend,
+            "Cap/Spend Multiple" = CapSpendRatio,
+            "Adjusted Cap/Spend Multiple" = CapSpendProp) %>%
+  formattable()
+```
+
+The results of this calculation, plotted below, indicate that of the studied currencies, only Bitcoin SV and Monero have Cap/Spend multiples higher than that of Bitcoin. The causes of the variation are unclear, but are represent the other aspects of market sentiment that are not captured by the amount of capital securing the network. Critically, this variation is also where the usefulness of the Cap/Spend Multiple show through---by comparing each currency's multiple to that of the others, we can see whether it is valued consistently with respect to its total security spend, and potentially make more informed decisions in our investments.
+
+```{r echo=FALSE, warning=FALSE}
+ag_info %>%
+  ggplot(aes(x = Symbol, y = CapSpendProp, color = Symbol)) +
+  geom_point() +
+  geom_hline(yintercept = 100, linetype = "dashed", color = "#F8766D") +
+  ylim(c(0, 115)) +
+  labs(title = "Cap/Spend Multiple, Adjusted against Bitcoin", y = "Cap/Spend Multiple (Percent of Benchmark)", x = "Daily Network Security Spend (BTC)") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+## Implications
+
+The Cap/Spend Multiple has several limitations: there is likely some deviation between the price of NiceHash hashpower and the price at which the average coin is actually mined, the causal relationship between the two variables is unclear, and the multiple says nothing about the degree of miner centralization or dominance in the hardware used. However, since it provides a single-number comparison of the network's value versus security from an outside attacker, we believe it is highly valuable. We believe it would be helpful to run a more comprehensive study across the entire universe of Proof of Work assets; it would also be interesting to run a study in which the value of the entire value secured by the chain, rather than only that of the native token, is considered in the market cap component, in which case it is likely that Ethereum's Cap/Spend multiple would rise substantially. On the whole, we see this as a useful analogue to a Price/Earnings multiple in traditional equities, and hope to see wider adoption of this metric as the space adopts more rigorous financial analysis techniques.
+
+## Acknowledgements
+
+We would like to thank [BitInfoCharts](https://bitinfocharts.com/) and [NiceHash](https://www.nicehash.com/) for the data used in this report.
